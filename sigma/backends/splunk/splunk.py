@@ -26,8 +26,16 @@ from sigma.pipelines.splunk.splunk import (
     splunk_web_proxy_cim_mapping,
     splunk_dns_cim_mapping,
 )
+from sigma.backends.splunk.security_content import (
+    SecurityContentArtifact,
+    SecurityContentOptions,
+    SecurityContentValidationError,
+    build_detection,
+    compose_union,
+    serialize_detections,
+)
 import sigma
-from typing import Any, Callable, ClassVar, Dict, List, Optional, Pattern, Set, Tuple, Union
+from typing import Any, Callable, ClassVar, Dict, List, Mapping, Optional, Pattern, Set, Tuple, Union
 
 
 class SplunkDeferredRegularExpression(DeferredTextQueryExpression):
@@ -141,6 +149,8 @@ class SplunkBackend(TextQueryBackend):
             "default": "Plain SPL queries",
             "savedsearches": "Plain SPL in a savedsearches.conf file",
             "data_model": "Data model queries with tstats",
+            "security_content": "Splunk Security Content detection YAML with raw SPL",
+            "security_content_data_model": "Splunk Security Content detection YAML with CIM tstats SPL",
         }
     )
     requires_pipeline: ClassVar[bool] = (
@@ -298,6 +308,13 @@ class SplunkBackend(TextQueryBackend):
         summariesonly: bool = False,
         query_settings: Callable[[SigmaRule], Dict[str, str]] = lambda x: {},
         output_settings: Dict = {},
+        security_content_mode: str = "strict",
+        security_content_defaults: Optional[Mapping[str, Any]] = None,
+        security_content_entity_fields: Optional[Mapping[str, str]] = None,
+        security_content_percentile_mode: str = "exact",
+        security_content_max_ordered_sequences: int = 64,
+        security_content_union_maxout: Optional[int] = None,
+        security_content_union_maxtime: Optional[int] = None,
         **kwargs,
     ):
         super().__init__(processing_pipeline, collect_errors, **kwargs)
@@ -308,6 +325,15 @@ class SplunkBackend(TextQueryBackend):
             "dispatch.latest_time": max_time,
         }
         self.output_settings.update(output_settings)
+        self.security_content_options = SecurityContentOptions(
+            mode=security_content_mode,
+            defaults=dict(security_content_defaults or {}),
+            entity_fields=dict(security_content_entity_fields or {}),
+            percentile_mode=security_content_percentile_mode,
+            max_ordered_sequences=security_content_max_ordered_sequences,
+            union_maxout=security_content_union_maxout,
+            union_maxtime=security_content_union_maxtime,
+        )
 
     @staticmethod
     def _generate_settings(settings):
@@ -712,3 +738,69 @@ class SplunkBackend(TextQueryBackend):
 
     def finalize_output_data_model(self, queries: List[str]) -> List[str]:
         return queries
+
+    def finalize_query_security_content(
+        self,
+        rule: Union[SigmaRule, SigmaCorrelationRule],
+        query: str,
+        index: int,
+        state: ConversionState,
+    ) -> SecurityContentArtifact:
+        search = self.finalize_query_default(rule, query, index, state)
+        return SecurityContentArtifact(rule, search, dict(state.processing_state))
+
+    def finalize_query_security_content_data_model(
+        self,
+        rule: Union[SigmaRule, SigmaCorrelationRule],
+        query: str,
+        index: int,
+        state: ConversionState,
+    ) -> SecurityContentArtifact:
+        search = self.finalize_query_data_model(rule, query, index, state)
+        return SecurityContentArtifact(rule, search, dict(state.processing_state))
+
+    def _finalize_security_content_output(
+        self, artifacts: List[SecurityContentArtifact]
+    ) -> str:
+        grouped: Dict[int, List[SecurityContentArtifact]] = {}
+        for artifact in artifacts:
+            if not isinstance(artifact, SecurityContentArtifact):
+                raise SecurityContentValidationError(
+                    "Security Content conversion produced an unfinalized search"
+                )
+            grouped.setdefault(id(artifact.rule), []).append(artifact)
+
+        detections = []
+        for rule_artifacts in grouped.values():
+            first = rule_artifacts[0]
+            search = compose_union(
+                [artifact.search for artifact in rule_artifacts],
+                self.security_content_options.union_maxout,
+                self.security_content_options.union_maxtime,
+            )
+            detections.append(
+                build_detection(
+                    SecurityContentArtifact(
+                        first.rule,
+                        search,
+                        first.state,
+                        tuple(
+                            diagnostic
+                            for artifact in rule_artifacts
+                            for diagnostic in artifact.diagnostics
+                        ),
+                    ),
+                    self.security_content_options,
+                )
+            )
+        return serialize_detections(detections)
+
+    def finalize_output_security_content(
+        self, artifacts: List[SecurityContentArtifact]
+    ) -> str:
+        return self._finalize_security_content_output(artifacts)
+
+    def finalize_output_security_content_data_model(
+        self, artifacts: List[SecurityContentArtifact]
+    ) -> str:
+        return self._finalize_security_content_output(artifacts)
