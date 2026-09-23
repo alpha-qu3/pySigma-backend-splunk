@@ -10,6 +10,9 @@ packages = [
     { include = "sigma" }
 ]
 
+[tool.poetry.scripts]
+sigma-splunk-content = "sigma.backends.splunk.security_content_writer:main"
+
 [tool.poetry.dependencies]
 python = "^3.10"
 pysigma = "^1"
