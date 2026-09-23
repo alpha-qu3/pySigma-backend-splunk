@@ -243,3 +243,20 @@ detection:
 """
         )
     ) == ['field="value"']
+
+
+def test_batch_rejects_duplicate_ids_and_normalized_filename_collisions():
+    duplicate_id = STRICT_RULE + "\n---\n" + STRICT_RULE.replace(
+        "Suspicious User Process", "Different Name"
+    )
+    with pytest.raises(SecurityContentValidationError, match="duplicate detection id"):
+        SplunkBackend().convert(SigmaCollection.from_yaml(duplicate_id), "security_content")
+
+    collision = STRICT_RULE + "\n---\n" + STRICT_RULE.replace(
+        "Suspicious User Process", "Suspicious-User Process"
+    ).replace(
+        "11111111-1111-4111-8111-111111111111",
+        "22222222-2222-4222-8222-222222222222",
+    )
+    with pytest.raises(SecurityContentValidationError, match="filename collision"):
+        SplunkBackend().convert(SigmaCollection.from_yaml(collision), "security_content")

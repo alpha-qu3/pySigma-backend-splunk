@@ -32,8 +32,10 @@ from sigma.backends.splunk.security_content import (
     SecurityContentValidationError,
     build_detection,
     compose_union,
+    normalize_detection_name,
     serialize_detections,
 )
+from sigma.backends.splunk.security_content_correlations import build_correlation_search
 import sigma
 from typing import Any, Callable, ClassVar, Dict, List, Mapping, Optional, Pattern, Set, Tuple, Union
 
@@ -360,6 +362,119 @@ class SplunkBackend(TextQueryBackend):
         ):
             return False
         return super().compare_precedence(outer, inner)
+
+    def convert(
+        self,
+        rule_collection,
+        output_format: Optional[str] = None,
+        correlation_method: Optional[str] = None,
+        callback: Optional[Callable] = None,
+    ) -> Any:
+        if output_format in {"security_content", "security_content_data_model"}:
+            self._validate_security_content_correlation_graph(rule_collection)
+        return super().convert(
+            rule_collection, output_format, correlation_method, callback
+        )
+
+    @staticmethod
+    def _validate_security_content_correlation_graph(rule_collection) -> None:
+        from sigma.correlations import SigmaExtendedCorrelationCondition
+
+        identifiers = {}
+        for rule in rule_collection.rules:
+            if getattr(rule, "name", None):
+                identifiers[str(rule.name)] = rule
+            if getattr(rule, "id", None):
+                identifiers[str(rule.id)] = rule
+
+        graph = {}
+        for rule in rule_collection.rules:
+            if not isinstance(rule, SigmaCorrelationRule):
+                continue
+            references = [reference.reference for reference in (rule.rules or [])]
+            if isinstance(rule.condition, SigmaExtendedCorrelationCondition):
+                references.extend(rule.condition.get_referenced_rules())
+            graph[id(rule)] = [
+                identifiers[reference]
+                for reference in dict.fromkeys(references)
+                if reference in identifiers
+                and isinstance(identifiers[reference], SigmaCorrelationRule)
+            ]
+
+        visiting = set()
+        visited = set()
+
+        def visit(rule):
+            key = id(rule)
+            if key in visiting:
+                raise SecurityContentValidationError(
+                    "correlation reference cycle detected"
+                )
+            if key in visited:
+                return
+            visiting.add(key)
+            for referenced_rule in graph.get(key, []):
+                visit(referenced_rule)
+            visiting.remove(key)
+            visited.add(key)
+
+        for rule in rule_collection.rules:
+            if isinstance(rule, SigmaCorrelationRule):
+                visit(rule)
+
+    def convert_rule(
+        self,
+        rule: SigmaRule,
+        output_format: Optional[str] = None,
+        callback: Optional[Callable] = None,
+    ) -> List[Any]:
+        results = super().convert_rule(rule, output_format, callback)
+        if output_format not in {"security_content", "security_content_data_model"}:
+            return results
+        if rule._backreferences and rule._output:
+            raw_results = rule.get_conversion_result()
+            states = rule.get_conversion_states()
+            return [
+                SecurityContentArtifact(
+                    rule,
+                    query,
+                    dict(states[index].processing_state),
+                )
+                for index, query in enumerate(raw_results)
+            ]
+        return results
+
+    def convert_correlation_rule(
+        self,
+        rule: SigmaCorrelationRule,
+        output_format: Optional[str] = None,
+        method: Optional[str] = None,
+        callback: Optional[Callable] = None,
+    ) -> List[Any]:
+        if output_format not in {"security_content", "security_content_data_model"}:
+            return super().convert_correlation_rule(rule, output_format, method, callback)
+
+        self.last_processing_pipeline.apply(rule)
+        state = ConversionState(processing_state=dict(self.last_processing_pipeline.state))
+        search = build_correlation_search(
+            self,
+            rule,
+            output_format == "security_content_data_model",
+        )
+        if callback is not None:
+            search = callback(rule, output_format, 0, search, search)
+        results = [] if search is None else [search]
+        rule.set_conversion_result(results)
+        rule.set_conversion_states([state] if results else [])
+        if not rule._output or search is None:
+            return []
+        return [
+            SecurityContentArtifact(
+                rule,
+                search,
+                dict(state.processing_state),
+            )
+        ]
 
     def convert_condition_field_eq_val_re(
         self,
@@ -793,6 +908,21 @@ class SplunkBackend(TextQueryBackend):
                     self.security_content_options,
                 )
             )
+        seen_ids = {}
+        seen_names = {}
+        for detection in detections:
+            detection_id = detection["id"]
+            filename = normalize_detection_name(detection["name"])
+            if detection_id in seen_ids:
+                raise SecurityContentValidationError(
+                    f"duplicate detection id: {detection_id}"
+                )
+            if filename in seen_names:
+                raise SecurityContentValidationError(
+                    f"normalized filename collision: {filename}.yml"
+                )
+            seen_ids[detection_id] = detection["name"]
+            seen_names[filename] = detection_id
         return serialize_detections(detections)
 
     def finalize_output_security_content(
