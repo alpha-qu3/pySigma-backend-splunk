@@ -1,0 +1,125 @@
+name: Security Content Compatibility
+
+on:
+  pull_request:
+  push:
+    branches: ["*"]
+  workflow_dispatch:
+  schedule:
+    - cron: "23 4 * * 2"
+
+jobs:
+  contentctl:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6.1.0
+        with:
+          python-version: "3.14"
+      - name: Install backend and pinned contentctl
+        run: pip install . contentctl-ng==1.1.1
+      - name: Checkout reviewed Security Content snapshot
+        uses: actions/checkout@v6
+        with:
+          repository: splunk/security_content
+          ref: 1a41f94ca5c6efede6a61cf83e75527ed84a8e1d
+          path: security-content
+      - name: Generate and place compatibility fixture
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from sigma.backends.splunk import SplunkBackend
+          from sigma.backends.splunk.security_content_writer import write_detections
+          from sigma.collection import SigmaCollection
+
+          source = Path("tests/fixtures/security_content_compatibility.yml").read_text()
+          output = SplunkBackend().convert(
+              SigmaCollection.from_yaml(source), "security_content"
+          )
+          report = write_detections("security-content", output)
+          if report.errors:
+              raise SystemExit("\n".join(report.errors))
+          print(report.counts)
+          PY
+      - name: Validate with contentctl
+        working-directory: security-content
+        run: contentctl validate
+
+  live-splunk:
+    if: ${{ vars.SPLUNK_LIVE_TESTS == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6.1.0
+        with:
+          python-version: "3.13"
+      - name: Install test dependencies
+        run: pip install . pytest
+      - name: Execute representative searches
+        env:
+          SPLUNK_LIVE_TESTS: "1"
+          SPLUNK_URL: ${{ secrets.SPLUNK_URL }}
+          SPLUNK_USERNAME: ${{ secrets.SPLUNK_USERNAME }}
+          SPLUNK_PASSWORD: ${{ secrets.SPLUNK_PASSWORD }}
+          SPLUNK_VERIFY_TLS: ${{ vars.SPLUNK_VERIFY_TLS }}
+        run: pytest -q -m live_splunk tests/test_security_content_live_splunk.py
+
+  snapshot-smoke:
+    if: ${{ github.event_name == 'schedule' }}
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6.1.0
+        with:
+          python-version: "3.14"
+      - name: Install backend and contentctl
+        run: pip install . contentctl-ng==1.1.1
+      - name: Checkout pinned Sigma rules
+        uses: actions/checkout@v6
+        with:
+          repository: SigmaHQ/sigma
+          ref: 16eb58704e941956d29b1a27da6f967c5525a9bb
+          path: sigma-rules
+      - name: Checkout current Security Content develop
+        uses: actions/checkout@v6
+        with:
+          repository: splunk/security_content
+          ref: develop
+          path: security-content
+      - name: Convert the first compatible pinned Sigma rule
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from sigma.backends.splunk import SplunkBackend
+          from sigma.backends.splunk.security_content_writer import write_detections
+          from sigma.collection import SigmaCollection
+
+          defaults = {
+              "analytic_story": ["Credential Dumping"],
+              "data_source": [],
+              "creation_date": "2024-01-01",
+          }
+          backend = SplunkBackend(
+              security_content_mode="draft",
+              security_content_defaults=defaults,
+          )
+          failures = []
+          for path in sorted(Path("sigma-rules/rules").rglob("*.yml")):
+              try:
+                  output = backend.convert(
+                      SigmaCollection.from_yaml(path.read_text()), "security_content"
+                  )
+                  report = write_detections("security-content", output)
+                  if report.errors:
+                      raise ValueError("; ".join(report.errors))
+                  print(f"converted {path}: {report.counts}")
+                  break
+              except Exception as exc:
+                  failures.append(f"{path}: {exc}")
+          else:
+              raise SystemExit("No compatible rule found\n" + "\n".join(failures[-10:]))
+          PY
+      - name: Validate current snapshot
+        working-directory: security-content
+        run: contentctl validate

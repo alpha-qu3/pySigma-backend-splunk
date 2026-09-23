@@ -1,0 +1,33 @@
+title: Sigma Conversion Compatibility Fixture
+id: c5c4e59f-03cf-4d7e-bdf8-b60181275929
+status: test
+description: Exercises Security Content conversion with a small process rule.
+author: SigmaHQ
+date: 2024-01-01
+modified: 2024-01-01
+level: medium
+tags:
+  - attack.t1059.001
+logsource:
+  product: windows
+  category: process_creation
+detection:
+  selection:
+    Image|endswith: \powershell.exe
+  condition: selection
+splunk_security_content:
+  version: 1
+  type: Hunting
+  analytic_story:
+    - Credential Dumping
+  data_source:
+    - Sysmon EventID 1
+  asset_type: Endpoint
+  category: endpoint
+  security_domain: endpoint
+  how_to_implement: Enable process creation telemetry and map the Image field.
+  known_false_positives: Administrators may run PowerShell for legitimate work.
+  tests:
+    - name: Conversion review
+      test_type: experimental
+      description: Review the converted query and field mappings before promotion.

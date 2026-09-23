@@ -24,6 +24,11 @@ pytest = "^9.0"
 pytest-cov = "^7.0"
 defusedxml = "^0.7.1"
 
+[tool.pytest.ini_options]
+markers = [
+    "live_splunk: executes representative searches against an explicitly configured Splunk instance",
+]
+
 [build-system]
 requires = ["poetry-core>=1.8.1"]
 build-backend = "poetry.core.masonry.api"
