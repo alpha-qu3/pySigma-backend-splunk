@@ -70,14 +70,22 @@ def convert_correlation(correlation, *, cim=False, **kwargs):
     [
         ("event_count", "", "sum(_sc_event_count) as event_count"),
         ("value_count", "        field: ProcessId\n", "dc(ProcessId) as value_count"),
-        ("value_sum", "        field: ProcessId\n", "sum(_sc_weighted_value) as value_sum"),
+        (
+            "value_sum",
+            "        field: ProcessId\n",
+            "sum(_sc_weighted_value) as value_sum",
+        ),
         ("value_avg", "        field: ProcessId\n", "eval value_avg="),
         (
             "value_percentile",
             "        field: ProcessId\n        percentile: 90\n",
             "exactperc90(ProcessId) as value_percentile",
         ),
-        ("value_median", "        field: ProcessId\n", "median(ProcessId) as value_median"),
+        (
+            "value_median",
+            "        field: ProcessId\n",
+            "median(ProcessId) as value_median",
+        ),
     ],
 )
 def test_raw_value_correlations_are_bucketed_and_weight_aware(
@@ -147,7 +155,8 @@ correlation:
     assert "| bin _time" not in search
     assert '_sc_event_type="first_event"' in search
     assert '_sc_event_type="second_event"' in search
-    assert "=0" in search
+    assert "NOT (" in search
+    assert "_sc_future_second_event" in search
 
 
 def test_ordered_temporal_advances_predecessor_timestamps():
@@ -174,7 +183,9 @@ correlation:
 
 
 def test_ordered_temporal_rejects_not():
-    source = BASE_RULES + """
+    source = (
+        BASE_RULES
+        + """
 ---
 title: Invalid ordered activity
 status: test
@@ -186,6 +197,7 @@ correlation:
     timespan: 15m
     condition: first_event and not second_event
 """
+    )
     with pytest.raises(SecurityContentValidationError, match="ordered.*NOT"):
         draft_backend().convert(SigmaCollection.from_yaml(source), "security_content")
 
@@ -222,6 +234,8 @@ correlation:
     )[-1]["search"]
 
     assert "| tstats" in event_count
+    assert "by _time" in event_count
+    assert "span=1s" in event_count
     assert "sum(_sc_event_count) as event_count" in event_count
     assert "mvrange(0,_sc_event_count)" in median
     assert "mvexpand _sc_frequency" in median
@@ -256,11 +270,13 @@ correlation:
 
     search = documents[-1]["search"]
     assert search.count("sum(_sc_event_count) as event_count") == 2
-    assert "eval _sc_event_type=\"inner_correlation\"" in search
+    assert 'eval _sc_event_type="inner_correlation"' in search
 
 
 def test_generate_true_emits_referenced_rule_and_correlation():
-    source = BASE_RULES + """
+    source = (
+        BASE_RULES
+        + """
 ---
 title: Generated correlation
 status: test
@@ -272,6 +288,7 @@ correlation:
     condition:
         gte: 2
 """
+    )
     backend = draft_backend()
     with pytest.warns(UserWarning, match="generic"):
         output = backend.convert(SigmaCollection.from_yaml(source), "security_content")
@@ -310,7 +327,9 @@ correlation:
 
 
 def test_ordered_or_expansion_honors_configured_limit():
-    source = BASE_RULES + """
+    source = (
+        BASE_RULES
+        + """
 ---
 title: Expanded ordered activity
 status: test
@@ -322,6 +341,7 @@ correlation:
     timespan: 5m
     condition: first_event or second_event
 """
+    )
     with pytest.raises(SecurityContentValidationError, match="sequence limit"):
         draft_backend(security_content_max_ordered_sequences=1).convert(
             SigmaCollection.from_yaml(source), "security_content"
@@ -330,7 +350,9 @@ correlation:
 
 @pytest.mark.parametrize("percentile", [0, 100, -1])
 def test_percentile_bounds_are_validated(percentile):
-    source = BASE_RULES + f"""
+    source = (
+        BASE_RULES
+        + f"""
 ---
 title: Invalid percentile
 status: test
@@ -343,6 +365,7 @@ correlation:
         field: ProcessId
         percentile: {percentile}
 """
+    )
     with pytest.raises(SecurityContentValidationError, match="between 1 and 99"):
         draft_backend().convert(SigmaCollection.from_yaml(source), "security_content")
 
@@ -356,7 +379,9 @@ def test_cim_correlation_rejects_custom_tstats_semantics():
             )
         ]
     )
-    source = BASE_RULES + """
+    source = (
+        BASE_RULES
+        + """
 ---
 title: Conflicting CIM correlation
 status: test
@@ -367,6 +392,7 @@ correlation:
     condition:
         gt: 1
 """
+    )
     backend = draft_backend(processing_pipeline=pipeline)
     with pytest.raises(SecurityContentValidationError, match="tstats_span"):
         backend.convert(
@@ -375,7 +401,9 @@ correlation:
 
 
 def test_protected_internal_field_collision_is_rejected():
-    source = BASE_RULES.replace("User: alice", "_sc_event_count: 4", 1) + """
+    source = (
+        BASE_RULES.replace("User: alice", "_sc_event_count: 4", 1)
+        + """
 ---
 title: Protected collision
 status: test
@@ -386,7 +414,10 @@ correlation:
     condition:
         gt: 1
 """
-    with pytest.raises(SecurityContentValidationError, match="protected correlation field"):
+    )
+    with pytest.raises(
+        SecurityContentValidationError, match="protected correlation field"
+    ):
         draft_backend().convert(SigmaCollection.from_yaml(source), "security_content")
 
 
@@ -417,7 +448,9 @@ correlation:
 
 
 def test_cim_temporal_correlation_supports_mixed_data_models():
-    source = BASE_RULES.split("---", 1)[0] + """
+    source = (
+        BASE_RULES.split("---", 1)[0]
+        + """
 ---
 title: DNS event
 name: dns_event
@@ -439,6 +472,7 @@ correlation:
         - dns_event
     timespan: 10m
 """
+    )
     backend = draft_backend(processing_pipeline=splunk_cim_data_model())
     with pytest.warns(UserWarning, match="generic"):
         output = backend.convert(
@@ -452,11 +486,13 @@ correlation:
 
 
 def test_referenced_rule_with_multiple_conditions_keeps_every_typed_branch():
-    source = BASE_RULES.replace(
-        "selection:\n        User: alice\n        ProcessId: 10\n    condition: selection",
-        "one:\n        User: alice\n    two:\n        User: bob\n    condition:\n        - one\n        - two",
-        1,
-    ) + """
+    source = (
+        BASE_RULES.replace(
+            "selection:\n        User: alice\n        ProcessId: 10\n    condition: selection",
+            "one:\n        User: alice\n    two:\n        User: bob\n    condition:\n        - one\n        - two",
+            1,
+        )
+        + """
 ---
 title: Multi-condition count
 status: test
@@ -467,6 +503,7 @@ correlation:
     condition:
         gt: 1
 """
+    )
     backend = draft_backend()
     with pytest.warns(UserWarning, match="generic"):
         output = backend.convert(SigmaCollection.from_yaml(source), "security_content")
@@ -474,3 +511,47 @@ correlation:
 
     assert search.startswith("| union")
     assert search.count('_sc_event_type="first_event"') == 2
+
+
+def test_basic_temporal_counts_distinct_rules_and_honors_operator():
+    documents = convert_correlation(
+        """
+title: Exact temporal activity
+status: test
+correlation:
+    type: temporal
+    rules:
+        - first_event
+        - second_event
+    timespan: 5m
+    condition:
+        eq: 2
+"""
+    )
+    search = documents[-1]["search"]
+
+    assert "_sc_distinct_rule_count" in search
+    assert "where _sc_distinct_rule_count = 2" in search
+    assert "_sc_seen_first_event+_sc_seen_second_event" not in search
+
+
+def test_extended_temporal_negation_preserves_boolean_structure_and_checks_future():
+    documents = convert_correlation(
+        """
+title: Negated temporal activity
+status: test
+correlation:
+    type: temporal
+    rules:
+        - first_event
+        - second_event
+    timespan: 5m
+    condition: not (first_event and second_event)
+"""
+    )
+    search = documents[-1]["search"]
+
+    assert "NOT (" in search
+    assert "_sc_future_first_event" in search
+    assert "_sc_future_second_event" in search
+    assert "first_event=0 AND" not in search

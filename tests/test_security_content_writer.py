@@ -69,18 +69,16 @@ def content_repo(tmp_path):
         tmp_path / "data_sources" / "sysmon_eventid_1.yml",
         {"name": "Sysmon EventID 1"},
     )
-    write_yaml(tmp_path / "baselines" / "known_baseline.yml", {"name": "Known Baseline"})
+    write_yaml(
+        tmp_path / "baselines" / "known_baseline.yml", {"name": "Known Baseline"}
+    )
     write_yaml(tmp_path / "macros" / "known_macro.yml", {"name": "known_macro"})
     write_yaml(
         tmp_path / "lookups" / "known_lookup.yml",
         {"name": "known_lookup", "lookup_type": "kvstore"},
     )
     schema = {
-        "$defs": {
-            "AtomicGuidEnum": {
-                "enum": ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"]
-            }
-        }
+        "$defs": {"AtomicGuidEnum": {"enum": ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"]}}
     }
     (tmp_path / "schemas").mkdir()
     (tmp_path / "schemas" / "EventBasedDetection.schema.json").write_text(
@@ -166,8 +164,8 @@ def test_preflight_rejects_path_and_uuid_collisions(content_repo):
 def test_reference_validation_covers_local_and_external_indexes(content_repo):
     valid = deepcopy(DETECTION)
     valid["search"] = (
-        '| inputlookup external_lookup\n| `external_macro`\n'
-        '| `suspicious_user_process_filter`'
+        "| inputlookup external_lookup\n| `external_macro`\n"
+        "| `suspicious_user_process_filter`"
     )
     assert preflight_repository(content_repo, stream(valid)).errors == []
 
@@ -183,7 +181,7 @@ def test_reference_validation_covers_local_and_external_indexes(content_repo):
         ),
         (
             "search",
-            '| inputlookup missing_lookup\n| `suspicious_user_process_filter`',
+            "| inputlookup missing_lookup\n| `suspicious_user_process_filter`",
             "lookup",
         ),
     ]
@@ -213,8 +211,8 @@ def test_deprecated_content_uses_deprecated_directory(content_repo):
     deprecated["status"] = "deprecated"
     deprecated["category"] = "deprecated"
     deprecated["deprecation_info"] = {
-        "date": "2024-03-03",
-        "description": "Superseded.",
+        "reason": "Superseded.",
+        "removed_in_version": "2.0.0",
     }
     report = preflight_repository(content_repo, stream(deprecated))
     assert report.actions[0].path.parent == content_repo / "detections" / "deprecated"
@@ -230,8 +228,61 @@ def test_cli_reads_input_and_reports_counts(content_repo, tmp_path, capsys):
     source = tmp_path / "detections.yml"
     source.write_text(stream(DETECTION), encoding="utf-8")
 
-    result = main(["write", "--repo", str(content_repo), "--input", str(source), "--check"])
+    result = main(
+        ["write", "--repo", str(content_repo), "--input", str(source), "--check"]
+    )
 
     assert result == 0
     assert "created=1" in capsys.readouterr().out
     assert not (content_repo / "detections").exists()
+
+
+@pytest.mark.parametrize("name", ["/tmp/owned", "../owned", "folder\\owned"])
+def test_writer_rejects_names_that_can_escape_repository(content_repo, name):
+    detection = deepcopy(DETECTION)
+    detection["name"] = name
+    detection["search"] = 'user="alice"\n| `owned_filter`'
+
+    report = write_detections(content_repo, yaml.safe_dump(detection))
+
+    assert any(
+        "name" in error.lower() or "path" in error.lower() for error in report.errors
+    )
+    assert not (content_repo.parent / "owned.yml").exists()
+
+
+def test_writer_rejects_detection_directory_symlink_escape(content_repo, tmp_path):
+    outside = tmp_path.parent / f"{tmp_path.name}-outside"
+    outside.mkdir()
+    (content_repo / "detections").symlink_to(outside, target_is_directory=True)
+
+    report = write_detections(content_repo, stream(DETECTION))
+
+    assert any("outside repository" in error.lower() for error in report.errors)
+    assert list(outside.iterdir()) == []
+
+
+def test_writer_canonicalizes_uuid_before_collision_checks(content_repo):
+    existing = deepcopy(DETECTION)
+    existing["id"] = "11111111-1111-4111-8111-111111111111"
+    write_yaml(content_repo / "detections" / "cloud" / "old.yml", existing)
+    incoming = deepcopy(DETECTION)
+    incoming["id"] = "{11111111-1111-4111-8111-111111111111}"
+
+    report = preflight_repository(content_repo, yaml.safe_dump(incoming))
+
+    assert any("another path" in error.lower() for error in report.errors)
+
+
+def test_writer_compares_existing_uuid_canonically_at_same_path(content_repo):
+    existing = deepcopy(DETECTION)
+    existing["id"] = "{11111111-1111-4111-8111-111111111111}"
+    target = content_repo / "detections" / "endpoint" / "suspicious_user_process.yml"
+    write_yaml(target, existing)
+    incoming = deepcopy(DETECTION)
+    incoming["version"] = 3
+
+    report = preflight_repository(content_repo, yaml.safe_dump(incoming))
+
+    assert report.errors == []
+    assert report.actions[0].kind == "updated"

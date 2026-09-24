@@ -48,7 +48,9 @@ def _post_cim_field(field_name: str) -> str:
     return str(field_name).rsplit(".", 1)[-1]
 
 
-def _alias_renames(rule: SigmaCorrelationRule, reference: SigmaRuleReference, cim: bool) -> str:
+def _alias_renames(
+    rule: SigmaCorrelationRule, reference: SigmaRuleReference, cim: bool
+) -> str:
     renames = []
     for alias in rule.aliases:
         for mapped_reference, field_name in alias.mapping.items():
@@ -76,10 +78,14 @@ def _reject_internal_collisions(reference: SigmaRuleReference, query: str) -> No
         )
 
 
-def _cim_branch(backend: Any, reference: SigmaRuleReference, query: str, index: int) -> str:
+def _cim_branch(
+    backend: Any, reference: SigmaRuleReference, query: str, index: int
+) -> str:
     states = reference.rule.get_conversion_states()
     if index >= len(states):
-        raise SecurityContentValidationError("CIM correlation branch has no conversion state")
+        raise SecurityContentValidationError(
+            "CIM correlation branch has no conversion state"
+        )
     state = states[index]
     conflicts = {
         key
@@ -90,10 +96,16 @@ def _cim_branch(backend: Any, reference: SigmaRuleReference, query: str, index: 
         raise SecurityContentValidationError(
             "CIM correlations cannot use custom " + ", ".join(sorted(conflicts))
         )
-    search = backend.finalize_query_data_model(reference.rule, query, index, state).strip()
+    state.processing_state["tstats_span"] = "1s"
+    try:
+        search = backend.finalize_query_data_model(
+            reference.rule, query, index, state
+        ).strip()
+    finally:
+        state.processing_state.pop("tstats_span", None)
     return (
         search
-        + '\n| eval _sc_event_count=count, '
+        + "\n| eval _sc_event_count=count, "
         + '_sc_first_time=strptime(firstTime,"%Y-%m-%dT%H:%M:%S"), '
         + '_sc_last_time=strptime(lastTime,"%Y-%m-%dT%H:%M:%S")'
     )
@@ -140,7 +152,9 @@ def _group_fields(rule: SigmaCorrelationRule, cim: bool) -> list[str]:
 
 def _value_field(rule: SigmaCorrelationRule, cim: bool) -> str:
     if not isinstance(rule.condition, SigmaCorrelationCondition):
-        raise SecurityContentValidationError("value correlation requires a basic condition")
+        raise SecurityContentValidationError(
+            "value correlation requires a basic condition"
+        )
     field = rule.condition.fieldref
     if not isinstance(field, str) or not field:
         raise SecurityContentValidationError("value correlation requires one field")
@@ -154,7 +168,13 @@ def _by(group_fields: Iterable[str], include_time: bool = True) -> str:
 
 def _condition(rule: SigmaCorrelationRule, value_name: str) -> str:
     if not isinstance(rule.condition, SigmaCorrelationCondition):
-        raise SecurityContentValidationError("aggregate correlation requires a basic condition")
+        raise SecurityContentValidationError(
+            "aggregate correlation requires a basic condition"
+        )
+    if type(rule.condition.count) is not int or rule.condition.count < 0:
+        raise SecurityContentValidationError(
+            "correlation count must be a non-negative integer"
+        )
     return f"| where {value_name} {OPERATOR[rule.condition.op]} {rule.condition.count}"
 
 
@@ -171,7 +191,9 @@ def _aggregate_search(
     by = _by(groups)
     span = rule.timespan.spec
     prefix = source + f"\n| bin _time span={span}"
-    time_stats = "min(_sc_first_time) as _sc_first_time max(_sc_last_time) as _sc_last_time"
+    time_stats = (
+        "min(_sc_first_time) as _sc_first_time max(_sc_last_time) as _sc_last_time"
+    )
 
     if correlation_type == SigmaCorrelationType.EVENT_COUNT:
         value_name = "event_count"
@@ -207,7 +229,7 @@ def _aggregate_search(
             else:
                 value_name = "value_percentile"
                 percentile = rule.condition.percentile
-                if percentile is None or not 0 < percentile < 100:
+                if type(percentile) is not int or not 0 < percentile < 100:
                     raise SecurityContentValidationError(
                         "percentile must be between 1 and 99"
                     )
@@ -229,8 +251,7 @@ def _aggregate_search(
     search += (
         f"\n| eval _sc_event_count={value_name}, _sc_last_time=_time"
         "\n| fields _time _sc_event_type _sc_event_count _sc_first_time "
-        "_sc_last_time "
-        + " ".join(groups)
+        "_sc_last_time " + " ".join(groups)
     ).rstrip()
     return search
 
@@ -243,15 +264,40 @@ def _marker_name(label: str) -> str:
     return "_sc_seen_" + re.sub(r"\W+", "_", label).strip("_").lower()
 
 
-def _extended_window_expression(node: Any) -> str:
+def _future_marker_name(label: str) -> str:
+    return "_sc_future_" + re.sub(r"\W+", "_", label).strip("_").lower()
+
+
+def _any_marker_name(label: str) -> str:
+    return "_sc_any_" + re.sub(r"\W+", "_", label).strip("_").lower()
+
+
+def _extended_window_expression(node: Any, negated: bool = False) -> str:
     if isinstance(node, SigmaRuleReference):
-        return f"{_marker_name(node.reference)}>0"
+        marker = (
+            _any_marker_name(node.reference)
+            if negated
+            else _marker_name(node.reference)
+        )
+        return f"{marker}>0"
     if isinstance(node, CorrelationConditionNOT):
-        return f"({_extended_window_expression(node.args[0]).replace('>0', '=0')})"
+        return f"NOT ({_extended_window_expression(node.args[0], not negated)})"
     if isinstance(node, CorrelationConditionAND):
-        return "(" + " AND ".join(_extended_window_expression(arg) for arg in node.args) + ")"
+        return (
+            "("
+            + " AND ".join(
+                _extended_window_expression(arg, negated) for arg in node.args
+            )
+            + ")"
+        )
     if isinstance(node, CorrelationConditionOR):
-        return "(" + " OR ".join(_extended_window_expression(arg) for arg in node.args) + ")"
+        return (
+            "("
+            + " OR ".join(
+                _extended_window_expression(arg, negated) for arg in node.args
+            )
+            + ")"
+        )
     raise SecurityContentValidationError("unsupported temporal condition expression")
 
 
@@ -259,10 +305,14 @@ def _temporal_search(rule: SigmaCorrelationRule, source: str, cim: bool) -> str:
     groups = _group_fields(rule, cim)
     labels = _all_references(rule)
     functions = []
+    future_functions = []
     for label in labels:
         escaped = label.replace('"', '\\"')
         functions.append(
             f'count(eval(_sc_event_type="{escaped}")) as {_marker_name(label)}'
+        )
+        future_functions.append(
+            f'count(eval(_sc_event_type="{escaped}")) as {_future_marker_name(label)}'
         )
     by = " by " + " ".join(groups) if groups else ""
     search = source
@@ -273,11 +323,35 @@ def _temporal_search(rule: SigmaCorrelationRule, source: str, cim: bool) -> str:
         + " min(_sc_first_time) as _sc_window_first max(_sc_last_time) as _sc_window_last"
         + by
     )
+    search += "\n| eval _sc_original_time=_time, _time=-_time"
+    search += "\n| sort 0 " + (" ".join(groups) + " " if groups else "") + "_time"
+    search += (
+        f"\n| streamstats time_window={rule.timespan.spec} current=t "
+        + " ".join(future_functions)
+        + by
+    )
+    search += "\n| eval _time=_sc_original_time"
+    search += "\n| sort 0 " + (" ".join(groups) + " " if groups else "") + "_time"
+    any_markers = []
+    for label in labels:
+        any_markers.append(
+            f"{_any_marker_name(label)}=if({_marker_name(label)}>0 OR "
+            f"{_future_marker_name(label)}>0,1,0)"
+        )
+    search += "\n| eval " + ", ".join(any_markers)
     if isinstance(rule.condition, SigmaExtendedCorrelationCondition):
         expression = _extended_window_expression(rule.condition.parsed)
     else:
-        needed = rule.condition.count
-        expression = "+".join(_marker_name(label) for label in labels) + f">={needed}"
+        if type(rule.condition.count) is not int or rule.condition.count < 0:
+            raise SecurityContentValidationError(
+                "temporal count must be a non-negative integer"
+            )
+        distinct = "+".join(f"if({_marker_name(label)}>0,1,0)" for label in labels)
+        search += f"\n| eval _sc_distinct_rule_count={distinct}"
+        expression = (
+            f"_sc_distinct_rule_count {OPERATOR[rule.condition.op]} "
+            f"{rule.condition.count}"
+        )
     search += f"\n| where {expression}"
     search += (
         "\n| eval _sc_event_count=1, _sc_first_time=_sc_window_first, "
@@ -290,7 +364,9 @@ def _ordered_sequences(node: Any) -> list[tuple[str, ...]]:
     if isinstance(node, SigmaRuleReference):
         return [(node.reference,)]
     if isinstance(node, CorrelationConditionNOT):
-        raise SecurityContentValidationError("ordered temporal conditions cannot contain NOT")
+        raise SecurityContentValidationError(
+            "ordered temporal conditions cannot contain NOT"
+        )
     if isinstance(node, CorrelationConditionOR):
         sequences = []
         for arg in node.args:
@@ -299,12 +375,18 @@ def _ordered_sequences(node: Any) -> list[tuple[str, ...]]:
     if isinstance(node, CorrelationConditionAND):
         sequences: list[tuple[str, ...]] = [()]
         for arg in node.args:
-            sequences = [left + right for left in sequences for right in _ordered_sequences(arg)]
+            sequences = [
+                left + right for left in sequences for right in _ordered_sequences(arg)
+            ]
         return sequences
-    raise SecurityContentValidationError("unsupported ordered temporal condition expression")
+    raise SecurityContentValidationError(
+        "unsupported ordered temporal condition expression"
+    )
 
 
-def _deduplicate_sequences(sequences: Iterable[tuple[str, ...]]) -> list[tuple[str, ...]]:
+def _deduplicate_sequences(
+    sequences: Iterable[tuple[str, ...]],
+) -> list[tuple[str, ...]]:
     seen = set()
     result = []
     for sequence in sequences:
@@ -327,7 +409,9 @@ def _ordered_search(
             "ordered temporal expression exceeds the configured sequence limit"
         )
     if not sequences or any(not sequence for sequence in sequences):
-        raise SecurityContentValidationError("ordered temporal condition produced no sequence")
+        raise SecurityContentValidationError(
+            "ordered temporal condition produced no sequence"
+        )
 
     by = " by " + " ".join(groups) if groups else ""
     search = source

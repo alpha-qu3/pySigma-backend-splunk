@@ -21,7 +21,9 @@ def test_documented_strict_conversion_fixture():
 
     assert first == second
     assert detection["name"] == "Sigma Conversion Compatibility Fixture"
-    assert detection["search"].endswith("`sigma_conversion_compatibility_fixture_filter`")
+    assert detection["search"].endswith(
+        "`sigma_conversion_compatibility_fixture_filter`"
+    )
 
 
 def test_readme_documents_public_security_content_interfaces():

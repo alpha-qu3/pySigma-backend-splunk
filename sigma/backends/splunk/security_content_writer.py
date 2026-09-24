@@ -6,6 +6,7 @@ import os
 import re
 import sys
 import tempfile
+import uuid
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -137,6 +138,7 @@ def _load_repository_index(root: Path, config: Mapping[str, Any]) -> RepositoryI
             resolved = path.resolve()
             detection_id = str(value.get("id", ""))
             if detection_id:
+                detection_id = str(uuid.UUID(detection_id))
                 if detection_id in index.detection_ids:
                     raise SecurityContentValidationError(
                         f"repository contains duplicate detection id {detection_id}"
@@ -162,15 +164,33 @@ def _parse_stream(value: str | Sequence[Mapping[str, Any]]) -> list[Mapping[str,
         raise SecurityContentValidationError("input contains no detection documents")
     if any(not isinstance(document, Mapping) for document in documents):
         raise SecurityContentValidationError("every input document must be a mapping")
-    return documents
+    canonical = []
+    for document in documents:
+        normalized = dict(document)
+        if "id" in normalized:
+            normalized["id"] = str(uuid.UUID(str(normalized["id"])))
+        canonical.append(normalized)
+    return canonical
 
 
 def _target_path(root: Path, detection: Mapping[str, Any]) -> Path:
+    detections_root = (root / "detections").resolve()
+    if not detections_root.is_relative_to(root.resolve()):
+        raise SecurityContentValidationError(
+            "detections directory resolves outside repository"
+        )
     directory = (
-        "deprecated" if detection.get("status") == "deprecated" else str(detection["category"])
+        "deprecated"
+        if detection.get("status") == "deprecated"
+        else str(detection["category"])
     )
     filename = normalize_detection_name(str(detection["name"])) + ".yml"
-    return (root / "detections" / directory / filename).resolve()
+    target = (detections_root / directory / filename).resolve()
+    if not target.is_relative_to(detections_root):
+        raise SecurityContentValidationError(
+            "detection path resolves outside repository"
+        )
+    return target
 
 
 def _date_key(value: Any) -> str:
@@ -277,7 +297,12 @@ def _plan_action(
     existing_at_path = index.detection_paths.get(target)
     id_path = index.detection_ids.get(detection_id)
 
-    if existing_at_path is not None and str(existing_at_path.get("id")) != detection_id:
+    existing_id = (
+        str(uuid.UUID(str(existing_at_path.get("id"))))
+        if existing_at_path is not None and existing_at_path.get("id")
+        else None
+    )
+    if existing_at_path is not None and existing_id != detection_id:
         report.errors.append(
             f"{detection['name']}: target path already belongs to another UUID"
         )
@@ -299,8 +324,13 @@ def _plan_action(
         report.actions.append(WriteAction("created", target, detection))
         return
 
-    old_version = int(existing_at_path.get("version", 0))
-    new_version = int(detection["version"])
+    old_version = existing_at_path.get("version", 0)
+    new_version = detection["version"]
+    if type(old_version) is not int or old_version < 1:
+        report.errors.append(
+            f"{detection['name']}: existing detection has an invalid version"
+        )
+        return
     if dict(existing_at_path) == dict(detection):
         report.actions.append(WriteAction("unchanged", target, detection))
         return
@@ -336,7 +366,9 @@ def preflight_repository(
             )
         config = _load_yaml(config_path)
         if not isinstance(config, Mapping):
-            raise SecurityContentValidationError("contentctl.yml must contain a mapping")
+            raise SecurityContentValidationError(
+                "contentctl.yml must contain a mapping"
+            )
         documents = _parse_stream(detections)
         index = _load_repository_index(root, config)
 
@@ -360,8 +392,16 @@ def preflight_repository(
             batch_paths.add(target)
             _validate_references(report, document, index)
             _plan_action(report, root, document, index)
-    except (OSError, ValueError, TypeError, yaml.YAMLError, json.JSONDecodeError) as exc:
+    except (
+        OSError,
+        ValueError,
+        TypeError,
+        yaml.YAMLError,
+        json.JSONDecodeError,
+    ) as exc:
         report.errors.append(str(exc))
+    if report.errors:
+        report.actions.clear()
     return report
 
 
@@ -403,8 +443,12 @@ def _parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     writer = subparsers.add_parser("write", help="validate and place detection YAML")
     writer.add_argument("--repo", required=True, type=Path)
-    writer.add_argument("--input", default="-", help="YAML stream path or '-' for stdin")
-    writer.add_argument("--check", action="store_true", help="preflight without writing")
+    writer.add_argument(
+        "--input", default="-", help="YAML stream path or '-' for stdin"
+    )
+    writer.add_argument(
+        "--check", action="store_true", help="preflight without writing"
+    )
     return parser
 
 
