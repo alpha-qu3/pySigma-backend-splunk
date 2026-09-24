@@ -183,6 +183,32 @@ def test_strict_mode_rejects_ambiguous_entity_inference():
         )
 
 
+def test_strict_mode_reports_missing_target_metadata_before_risk_inference():
+    rule = load_rule(
+        """
+title: Persistence Via Sudoers Files
+id: ddb26b76-4447-4807-871f-1b035b2bfa5d
+status: test
+description: Detects changes to sudoers files.
+author: Sigma
+date: 2022-07-05
+logsource:
+  product: linux
+  category: file_event
+detection:
+  selection:
+    TargetFilename: /etc/sudoers
+  condition: selection
+"""
+    )
+
+    with pytest.raises(SecurityContentValidationError, match="missing required fields"):
+        build_detection(
+            SecurityContentArtifact(rule, 'TargetFilename="/etc/sudoers"', {}),
+            SecurityContentOptions(),
+        )
+
+
 def test_validate_detection_enforces_type_risk_matrix_and_tokens():
     detection = build_detection(
         SecurityContentArtifact(load_rule(), 'user="alice"', {}),

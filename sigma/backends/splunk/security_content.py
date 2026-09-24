@@ -608,6 +608,13 @@ def build_detection(
     if not metadata["tests"]:
         metadata["tests"] = [_generated_review_test(name)]
 
+    missing = sorted(
+        field_name for field_name in REQUIRED_FIELDS if field_name not in metadata
+    )
+    if missing:
+        raise SecurityContentValidationError(
+            "missing required fields: " + ", ".join(missing)
+        )
     if not draft:
         _infer_risk(metadata, artifact, options)
 
